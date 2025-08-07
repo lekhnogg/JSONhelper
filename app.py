@@ -30,17 +30,15 @@ LABELS = {
     r"citation\s*accuracy": "citation_accuracy",
     r"citation\s*rationale": "citation_rationale",
 }
-# Match label (case-insensitive), allowing it to appear after punctuation or immediately after text,
-# and capture through the colon. Content starts at match.end().
-LABEL_REGEX = re.compile(
-    r"(?is)(?:^|[^\w])(" + "|".join(LABELS.keys()) + r")\s*:\s*"
-)
+# Allow labels to appear after punctuation or immediately after text; case-insensitive; consume the colon.
+LABEL_REGEX = re.compile(r"(?is)(?:^|[^\w])(" + "|".join(LABELS.keys()) + r")\s*:\s*")
 
 def extract_sections(text: str):
     matches = list(LABEL_REGEX.finditer(text))
     out = {}
     if not matches:
-        return out, text.strip() or None
+        # No labels detected; keep the entire text as residual
+        return out, (text.strip() or None)
 
     def map_label(key_pat: str) -> str:
         for pat, field in LABELS.items():
@@ -48,26 +46,24 @@ def extract_sections(text: str):
                 return field
         return None
 
+    # Pull labeled values
     for i, m in enumerate(matches):
         key_pat = m.group(1)
         start = m.end()  # after the colon
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         value = text[start:end].strip()
-        # Normalize trailing punctuation and whitespace
         value = re.sub(r"\s+", " ", value).rstrip()
-        # Drop trailing lone periods if desired
-        value = value.rstrip()
         field = map_label(key_pat)
         if field:
             out[field] = value or None
 
-    # Any leftover outside labeled blocks
+    # Residual (outside labeled blocks) = prefix + suffix
     prefix = text[:matches[0].start()].strip()
     suffix = text[matches[-1].end():].strip()
     residual = " ".join(s for s in (prefix, suffix) if s).strip() or None
     return out, residual
 
-# ---- Default schema (you can paste your own) ----
+# ---- Default schema (Draft-07) ----
 DEFAULT_SCHEMA = {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Review Payload",
@@ -95,7 +91,8 @@ DEFAULT_SCHEMA = {
     "est_time_answer": {"type":["string","null"]},
     "est_grade_level": {"type":["string","null"]},
     "est_difficulty_given_grade_level": {"type":["string","null"]},
-    "explanation": {"type":"string","minLength":1},
+    # Allow explanation to be string or null (so we can drop the labeled parts)
+    "explanation": {"type":["string","null"]},
 
     # Promoted (optional)
     "overall_notes": {"type":["string","null"]},
@@ -128,13 +125,14 @@ if st.button("Repair → Promote → Validate → Pretty-print"):
     else:
         st.success("JSON repaired and parsed.")
 
-        # Promote labeled sections from `explanation`
+        # Promote labeled sections and REPLACE explanation with residual (to avoid duplication)
         if isinstance(data.get("explanation"), str):
             sections, residual = extract_sections(data["explanation"])
             data.update(sections)
             data["explanation_residual"] = residual
+            data["explanation"] = residual  # <— overwrite original to remove duplicated content
 
-        # Schema: use pasted one if provided, else default
+        # Use pasted schema if provided, else default
         schema_txt = SCHEMA_TXT.strip() or json.dumps(DEFAULT_SCHEMA)
         try:
             schema = json.loads(schema_txt)
