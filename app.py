@@ -141,7 +141,8 @@ def split_segments(blob: str, limit: int = 4):
     return chunks[:limit]
 
 def process_one(raw_json_text: str, schema: dict):
-    fixed = repair_json(raw_json_text or "")
+    # Do NOT modify raw_json_text for the "Original Input" panel
+    fixed = repair_json(raw_json_text or "")  # repair only for parsing/validation
     data = json.loads(fixed)
     if isinstance(data.get("explanation"), str):
         sections, residual = extract_sections(data["explanation"])
@@ -169,7 +170,8 @@ if st.button("Process All"):
                 fixed, data, errs = process_one(seg, schema)
             except Exception as e:
                 st.error(f"Segment {i}: repair/parse failed → {e}")
-                st.code(seg, language="json")
+                # Show the raw original segment (wrapped) for debugging
+                st.text_area("Original Input (as pasted)", value=seg, height=200, disabled=True, key=f"orig_err_{i}")
                 continue
 
             if errs:
@@ -186,7 +188,12 @@ if st.button("Process All"):
                 st.json(data)
             with cols[1]:
                 st.subheader("Original Input (as pasted)")
-                st.code(seg, language="json")
+                # IMPORTANT: this is the **raw** segment, no repair, shown in a wrapped, non-editable text area
+                st.text_area("",
+                             value=seg,
+                             height=200,
+                             disabled=True,
+                             key=f"orig_{i}")
                 st.subheader("Repaired JSON (raw text)")
                 st.code(fixed, language="json")
 
