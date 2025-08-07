@@ -59,28 +59,49 @@ def extract_sections(text: str):
     if not matches:
         return out, (text.strip() or None)
 
+    # Map a matched label to its canonical field
     def map_label(key_pat: str) -> str:
         for pat, field in LABELS.items():
             if re.fullmatch(pat, key_pat, flags=re.IGNORECASE):
                 return field
         return None
 
+    # Collect value spans to remove from residual
+    spans = []
     for i, m in enumerate(matches):
         key_pat = m.group(1)
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        value = text[start:end].strip()
-        value = re.sub(r"\s+", " ", value).strip()
         field = map_label(key_pat)
+        start_val = m.end()  # after "Label: "
+        end_val = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        value = text[start_val:end_val].strip()
+        value = re.sub(r"\s+", " ", value).strip()
+
         if field:
             out[field] = None if (not value or _is_placeholder(value)) else value
+            # Remove the entire labeled block (label + value) from residual:
+            spans.append((m.start(), end_val))
+        else:
+            # If somehow not mapped, at least remove its label token
+            spans.append((m.start(), m.end()))
 
-    prefix = text[:matches[0].start()].strip()
-    suffix = text[matches[-1].end():].strip()
-    residual_chunks = " ".join(s for s in (prefix, suffix) if s).strip()
-    residual = residual_chunks if residual_chunks else None
+    # Build residual by keeping everything OUTSIDE labeled spans
+    keep = []
+    cursor = 0
+    for s, e in sorted(spans):
+        if cursor < s:
+            keep.append(text[cursor:s])
+        cursor = max(cursor, e)
+    if cursor < len(text):
+        keep.append(text[cursor:])
+
+    residual = re.sub(r"\s+", " ", (" ".join(keep)).strip()) or None
     if isinstance(residual, str) and _is_placeholder(residual):
         residual = None
+
+    # If residual accidentally equals any promoted value, clear it
+    if residual and any(residual == v for v in out.values() if isinstance(v, str)):
+        residual = None
+
     return out, residual
 
 # ---------- Default Draft-07 schema (RELAXED to allow "no answer") ----------
