@@ -140,15 +140,52 @@ def split_segments(blob: str, limit: int = 4):
     chunks = [p.strip() for p in parts if p.strip()]
     return chunks[:limit]
 
+# ---------- LaTeX brace protection (added) ----------
+# Use rare sentinel tokens to avoid accidental collisions.
+BRACE_L = "__⟪LBRACE⟫__"
+BRACE_R = "__⟪RBRACE⟫__"
+
+# Protect { } inside quoted strings for fields likely to contain LaTeX
+def _protect_field_braces(raw: str, field_names=("explanation","initial_answer_rationale","rationale_after_oa")) -> str:
+    # Matches "field": " ... possibly multi-line ... "
+    pat = re.compile(
+        r'("(?P<name>' + "|".join(map(re.escape, field_names)) + r')"\s*:\s*")(?P<val>(?:\\.|[^"\\])*)(")',
+        flags=re.DOTALL
+    )
+    def repl(m):
+        val = m.group("val").replace("{", BRACE_L).replace("}", BRACE_R)
+        return m.group(1) + val + m.group(4)
+    return pat.sub(repl, raw)
+
+def _restore_braces_in_values(obj):
+    def unmask(x):
+        if isinstance(x, str):
+            return x.replace(BRACE_L, "{").replace(BRACE_R, "}")
+        return x
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            obj[k] = _restore_braces_in_values(v)
+        return obj
+    if isinstance(obj, list):
+        return [ _restore_braces_in_values(v) for v in obj ]
+    return unmask(obj)
+
 def process_one(raw_json_text: str, schema: dict):
     # Do NOT modify raw_json_text for the "Original Input" panel
-    fixed = repair_json(raw_json_text or "")  # repair only for parsing/validation
+    preprotected = _protect_field_braces(raw_json_text or "")
+    fixed = repair_json(preprotected)  # repair for parsing/validation
     data = json.loads(fixed)
+
+    # Restore braces post-parse
+    data = _restore_braces_in_values(data)
+
+    # Promote labeled sections from explanation
     if isinstance(data.get("explanation"), str):
         sections, residual = extract_sections(data["explanation"])
         data.update(sections)
         data["explanation_residual"] = residual
         data["explanation"] = residual
+
     errors = sorted(Draft7Validator(schema).iter_errors(data), key=lambda e: e.path)
     return fixed, data, errors
 
@@ -188,7 +225,7 @@ if st.button("Process All"):
                 st.json(data)
             with cols[1]:
                 st.subheader("Original Input (as pasted)")
-                # IMPORTANT: this is the **raw** segment, no repair, shown in a wrapped, non-editable text area
+                # IMPORTANT: raw segment, no repair
                 st.text_area("",
                              value=seg,
                              height=200,
