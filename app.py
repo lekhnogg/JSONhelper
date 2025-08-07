@@ -136,25 +136,18 @@ DEFAULT_SCHEMA = {
 }
 
 def split_segments(blob: str, limit: int = 4):
-    # Split on lines that contain only 'reviewer' (case-insensitive, surrounding whitespace allowed)
     parts = re.split(r"(?im)^\s*reviewer\s*$", blob.strip())
-    # After split, parts[0] may be empty header; keep non-empty JSON-ish chunks
     chunks = [p.strip() for p in parts if p.strip()]
     return chunks[:limit]
 
 def process_one(raw_json_text: str, schema: dict):
-    # 1) Repair & parse
     fixed = repair_json(raw_json_text or "")
     data = json.loads(fixed)
-
-    # 2) Promote & replace explanation with residual (avoid duplication)
     if isinstance(data.get("explanation"), str):
         sections, residual = extract_sections(data["explanation"])
         data.update(sections)
         data["explanation_residual"] = residual
         data["explanation"] = residual
-
-    # 3) Validate
     errors = sorted(Draft7Validator(schema).iter_errors(data), key=lambda e: e.path)
     return fixed, data, errors
 
@@ -168,7 +161,7 @@ if st.button("Process All"):
 
     segments = split_segments(RAW_MULTI)
     if not segments:
-        st.info("No segments detected. Be sure to include lines that contain only the word 'reviewer' before each JSON block.")
+        st.info("No segments detected. Include lines that contain only the word 'reviewer' before each JSON block.")
     else:
         for i, seg in enumerate(segments, 1):
             st.markdown(f"### Segment {i}")
@@ -192,6 +185,8 @@ if st.button("Process All"):
                 st.subheader("Pretty JSON (promoted)")
                 st.json(data)
             with cols[1]:
+                st.subheader("Original Input (as pasted)")
+                st.code(seg, language="json")
                 st.subheader("Repaired JSON (raw text)")
                 st.code(fixed, language="json")
 
