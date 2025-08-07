@@ -83,7 +83,7 @@ def extract_sections(text: str):
         residual = None
     return out, residual
 
-# ---------- Default Draft-07 schema ----------
+# ---------- Default Draft-07 schema (RELAXED to allow "no answer") ----------
 DEFAULT_SCHEMA = {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Review Payload",
@@ -98,14 +98,16 @@ DEFAULT_SCHEMA = {
     "reviewer_title": {"type":"string","minLength":1},
     "answer": {
       "oneOf": [
-        {"type":"array","items":{"type":"string","pattern":"^[A-Z]$"},"minItems":1},
-        {"type":"string","pattern":"^[A-Z]$"}
+        {"type":"array","items":{"type":"string","pattern":"^[A-Z]$"},"minItems":0},  # allow []
+        {"type":"string","pattern":"^[A-Z]$"},
+        {"type":"null"}  # allow null for "no answer" cases (e.g., R3)
       ]
     },
     "answer_index": {
       "oneOf": [
-        {"type":"array","items":{"type":"integer","minimum":0},"minItems":1},
-        {"type":"integer","minimum":0}
+        {"type":"array","items":{"type":"integer","minimum":0},"minItems":0},  # allow []
+        {"type":"integer","minimum":0},
+        {"type":"null"}  # allow null for "no answer"
       ]
     },
     "est_time_answer": {"type":["string","null"]},
@@ -127,9 +129,14 @@ DEFAULT_SCHEMA = {
   },
   "allOf": [
     {"oneOf":[
+      # R1/R2 must use arrays (possibly empty after normalization)
       {"properties":{"reviewer_type":{"enum":["R1/R2"]},"answer":{"type":"array"},"answer_index":{"type":"array"}},
        "required":["reviewer_type","answer","answer_index"]},
+      # R3 with concrete single answer
       {"properties":{"reviewer_type":{"enum":["R3"]},"answer":{"type":"string"},"answer_index":{"type":"integer"}},
+       "required":["reviewer_type","answer","answer_index"]},
+      # R3 explicitly unanswered
+      {"properties":{"reviewer_type":{"enum":["R3"]},"answer":{"type":"null"},"answer_index":{"type":"null"}},
        "required":["reviewer_type","answer","answer_index"]}
     ]}
   ]
@@ -140,14 +147,11 @@ def split_segments(blob: str, limit: int = 4):
     chunks = [p.strip() for p in parts if p.strip()]
     return chunks[:limit]
 
-# ---------- LaTeX brace protection (added) ----------
-# Use rare sentinel tokens to avoid accidental collisions.
+# ---------- LaTeX brace protection ----------
 BRACE_L = "__⟪LBRACE⟫__"
 BRACE_R = "__⟪RBRACE⟫__"
 
-# Protect { } inside quoted strings for fields likely to contain LaTeX
 def _protect_field_braces(raw: str, field_names=("explanation","initial_answer_rationale","rationale_after_oa")) -> str:
-    # Matches "field": " ... possibly multi-line ... "
     pat = re.compile(
         r'("(?P<name>' + "|".join(map(re.escape, field_names)) + r')"\s*:\s*")(?P<val>(?:\\.|[^"\\])*)(")',
         flags=re.DOTALL
@@ -167,17 +171,36 @@ def _restore_braces_in_values(obj):
             obj[k] = _restore_braces_in_values(v)
         return obj
     if isinstance(obj, list):
-        return [ _restore_braces_in_values(v) for v in obj ]
+        return [_restore_braces_in_values(v) for v in obj]
     return unmask(obj)
+
+# ---------- Normalize sentinel values like ["NONE"] and [-1] ----------
+def _normalize_none_sentinels(d: dict):
+    rt = (d.get("reviewer_type") or "").strip()
+    ans = d.get("answer")
+    idx = d.get("answer_index")
+
+    if rt == "R1/R2":
+        if isinstance(ans, list) and len(ans) == 1 and isinstance(ans[0], str) and ans[0].strip().upper() in ("NONE","N/A","NA"):
+            d["answer"] = []  # empty = no selections
+        if isinstance(idx, list) and len(idx) == 1 and isinstance(idx[0], int) and idx[0] < 0:
+            d["answer_index"] = []  # empty = no indices
+    elif rt == "R3":
+        if isinstance(ans, str) and ans.strip().upper() in ("NONE","N/A","NA",""):
+            d["answer"] = None
+        if isinstance(idx, int) and idx < 0:
+            d["answer_index"] = None
+    return d
 
 def process_one(raw_json_text: str, schema: dict):
     # Do NOT modify raw_json_text for the "Original Input" panel
     preprotected = _protect_field_braces(raw_json_text or "")
-    fixed = repair_json(preprotected)  # repair for parsing/validation
-    data = json.loads(fixed)
+    repaired = repair_json(preprotected)  # repair for parsing/validation
+    data = json.loads(repaired)
 
-    # Restore braces post-parse
+    # Restore braces and normalize NONE/-1
     data = _restore_braces_in_values(data)
+    data = _normalize_none_sentinels(data)
 
     # Promote labeled sections from explanation
     if isinstance(data.get("explanation"), str):
@@ -186,8 +209,12 @@ def process_one(raw_json_text: str, schema: dict):
         data["explanation_residual"] = residual
         data["explanation"] = residual
 
+    # Validate
     errors = sorted(Draft7Validator(schema).iter_errors(data), key=lambda e: e.path)
-    return fixed, data, errors
+
+    # For display, show the final, clean JSON (not the masked intermediate)
+    fixed_display = json.dumps(data, ensure_ascii=False, indent=2)
+    return fixed_display, data, errors
 
 if st.button("Process All"):
     try:
@@ -204,10 +231,9 @@ if st.button("Process All"):
         for i, seg in enumerate(segments, 1):
             st.markdown(f"### Segment {i}")
             try:
-                fixed, data, errs = process_one(seg, schema)
+                fixed_text, data, errs = process_one(seg, schema)
             except Exception as e:
                 st.error(f"Segment {i}: repair/parse failed → {e}")
-                # Show the raw original segment (wrapped) for debugging
                 st.text_area("Original Input (as pasted)", value=seg, height=200, disabled=True, key=f"orig_err_{i}")
                 continue
 
@@ -225,14 +251,9 @@ if st.button("Process All"):
                 st.json(data)
             with cols[1]:
                 st.subheader("Original Input (as pasted)")
-                # IMPORTANT: raw segment, no repair
-                st.text_area("",
-                             value=seg,
-                             height=200,
-                             disabled=True,
-                             key=f"orig_{i}")
-                st.subheader("Repaired JSON (raw text)")
-                st.code(fixed, language="json")
+                st.text_area("", value=seg, height=200, disabled=True, key=f"orig_{i}")
+                st.subheader("Repaired JSON (final text)")
+                st.code(fixed_text, language="json")
 
         if len(segments) > 4:
             st.warning("Only the first 4 segments were processed.")
